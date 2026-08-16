@@ -591,7 +591,7 @@ class TestCompareOddsMocked:
     @patch("sports_skills.markets._connector._search_polymarket")
     @patch("sports_skills.markets._connector._search_kalshi")
     @patch("sports_skills.markets._connector._load_sport_module")
-    def test_prophetx_moneyline_odds_join_arb_pool(self, mock_load, mock_kalshi, mock_poly, mock_prophetx):
+    def test_only_game_moneylines_join_arb_pool(self, mock_load, mock_kalshi, mock_poly, mock_prophetx):
         mock_mod = MagicMock()
         mock_mod.get_game_summary.return_value = {
             "status": True,
@@ -605,7 +605,28 @@ class TestCompareOddsMocked:
         }
         mock_load.return_value = mock_mod
         mock_kalshi.return_value = []
-        mock_poly.return_value = []
+        mock_poly.return_value = [
+            {
+                "source": "polymarket",
+                "title": "Celtics vs. Lakers",
+                "market_id": "M1",
+                "sports_market_type": "moneyline",
+                "outcomes": [
+                    {"token_id": "T1", "outcome": "Celtics", "price": 0.61},
+                    {"token_id": "T2", "outcome": "Lakers", "price": 0.42},
+                ],
+            },
+            {
+                "source": "polymarket",
+                "title": "Will there be a run scored in the first inning?",
+                "market_id": "M2",
+                "sports_market_type": "",
+                "outcomes": [
+                    {"token_id": "T3", "outcome": "Yes", "price": 0.5},
+                    {"token_id": "T4", "outcome": "No", "price": 0.5},
+                ],
+            },
+        ]
         mock_prophetx.return_value = [
             {
                 "source": "prophetx",
@@ -647,8 +668,11 @@ class TestCompareOddsMocked:
         labels = [a.get("label", "") for a in arb["allocations"]]
         assert "prophetx_Celtics -150" in labels
         assert "prophetx_Lakers +130" in labels
+        assert "poly_Celtics" in labels
+        assert "poly_Lakers" in labels
         assert not any("Over 220" in label for label in labels)  # non-moneyline stays out
         assert not any("1H" in label for label in labels)  # derivative moneylines stay out
+        assert "poly_Yes" not in labels  # non-moneyline poly markets stay out
 
     def test_missing_sport(self):
         result = compare_odds({"params": {"event_id": "123"}})

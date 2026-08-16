@@ -852,17 +852,26 @@ def search_markets(request_data):
                     search_terms.extend(kalshi_names)
 
             if query:
-                # Check if ANY of our expanded search terms match the title
-                title_match = any(term in str(title).lower() for term in search_terms)
+                # Cross-venue callers build "<away> <home>" queries ("Orioles
+                # Rays") whose tokens are never contiguous in titles like
+                # "Orioles vs Rays Winner?" — accept when ALL tokens appear.
+                query_tokens = normalized_query.split()
+
+                def _matches(haystack):
+                    if any(term in haystack for term in search_terms):
+                        return True
+                    return len(query_tokens) > 1 and all(tok in haystack for tok in query_tokens)
+
+                # Check if the event title matches
+                title_match = _matches(str(title).lower())
 
                 # Also check market titles
                 event_match = False
                 markets = event.get("markets", [])
                 if not title_match:
                     for m in markets:
-                        m_title = str(m.get("title", "")).lower()
-                        m_sub = str(m.get("subtitle", "")).lower()
-                        if any(term in m_title or term in m_sub for term in search_terms):
+                        m_haystack = f"{m.get('title', '')} {m.get('subtitle', '')}".lower()
+                        if _matches(m_haystack):
                             event_match = True
                             break
 

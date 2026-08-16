@@ -799,25 +799,36 @@ def search_markets(request_data):
         return _error(f"Error searching markets: {str(e)}")
 
 
+def _query_matches(query, haystack):
+    """Contiguous match, or token-AND for multi-word queries.
+
+    Cross-venue callers build "<away> <home>" queries ("Orioles Rays") whose
+    tokens are never contiguous in titles like "Orioles vs. Rays" — every
+    token must appear, but not adjacently.
+    """
+    if query in haystack:
+        return True
+    tokens = query.split()
+    return len(tokens) > 1 and all(token in haystack for token in tokens)
+
+
 def _text_match(query, event):
     """Check if query matches event title, description, or slug."""
     q = query.lower()
-    return (
-        q in event.get("title", "").lower()
-        or q in event.get("description", "").lower()
-        or q in event.get("slug", "").lower()
-    )
+    haystack = " ".join(
+        [event.get("title", ""), event.get("description", ""), event.get("slug", "")]
+    ).lower()
+    return _query_matches(q, haystack)
 
 
 def _text_match_market(query, market):
     """Check if query matches market question, slug, or parent event title."""
     q = query.lower()
-    if q in market.get("question", "").lower() or q in market.get("slug", "").lower():
-        return True
-    return any(
-        q in e.get("title", "").lower() or q in e.get("slug", "").lower()
-        for e in market.get("events", [])
-    )
+    haystack = " ".join(
+        [market.get("question", ""), market.get("slug", "")]
+        + [f"{e.get('title', '')} {e.get('slug', '')}" for e in market.get("events", [])]
+    ).lower()
+    return _query_matches(q, haystack)
 
 
 def get_sports_config(request_data):

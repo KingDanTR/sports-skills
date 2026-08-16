@@ -216,3 +216,57 @@ class TestEventsPagination:
         result = get_todays_events({"params": {"sport": "worldcup", "limit": 50}})
         assert result["status"] is False
         assert "503" in result["message"]
+
+
+class TestSearchQueryMatching:
+    """Cross-venue callers (markets.compare_odds) build "<away> <home>"
+    queries whose tokens are never contiguous in Kalshi titles."""
+
+    @staticmethod
+    def _game_event(ticker, title):
+        return {
+            "event_ticker": ticker,
+            "title": title,
+            "markets": [
+                {
+                    "ticker": f"{ticker}-W",
+                    "title": "Winner?",
+                    "subtitle": "",
+                    "yes_bid": 55,
+                    "no_bid": 45,
+                    "last_price": 55,
+                    "volume": 100,
+                    "status": "active",
+                }
+            ],
+        }
+
+    @patch("sports_skills.kalshi._connector._request")
+    def test_two_token_query_matches_non_contiguous_title(self, mock_request):
+        from sports_skills.kalshi._connector import search_markets
+
+        mock_request.return_value = {
+            "events": [
+                self._game_event("KXMLBGAME-26AUG17BALTB", "Orioles vs Rays Winner?"),
+                self._game_event("KXMLBGAME-26AUG17NYYTOR", "Yankees vs Blue Jays Winner?"),
+            ],
+            "cursor": "",
+        }
+
+        result = search_markets({"params": {"series_ticker": "KXMLBGAME", "query": "Orioles Rays"}})
+        assert result["status"] is True
+        titles = {m["event_title"] for m in result["data"]["markets"]}
+        assert titles == {"Orioles vs Rays Winner?"}
+
+    @patch("sports_skills.kalshi._connector._request")
+    def test_two_token_query_requires_all_tokens(self, mock_request):
+        from sports_skills.kalshi._connector import search_markets
+
+        mock_request.return_value = {
+            "events": [self._game_event("KXMLBGAME-26AUG17BALTB", "Orioles vs Rays Winner?")],
+            "cursor": "",
+        }
+
+        result = search_markets({"params": {"series_ticker": "KXMLBGAME", "query": "Orioles Yankees"}})
+        assert result["status"] is True
+        assert result["data"]["markets"] == []

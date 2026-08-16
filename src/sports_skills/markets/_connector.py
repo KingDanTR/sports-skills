@@ -766,8 +766,12 @@ def compare_odds(request_data: dict) -> dict:
         all_probs.append(espn_comparison["away"]["implied_probability"])
         all_labels.append(f"espn_{away_team}")
 
-    # Add best market prices for arb check
+    # Add best market prices for arb check. Only game moneylines join the
+    # pool — same-game props/totals/derivatives price different propositions
+    # (aligned with the ProphetX handling below).
     for pm in poly_matches:
+        if pm.get("sports_market_type") != "moneyline":
+            continue
         for outcome in pm.get("outcomes", []):
             price = outcome.get("price", 0)
             if 0 < price < 1:

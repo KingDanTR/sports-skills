@@ -2753,12 +2753,14 @@ class TestLocalEloTable:
 
         c._cache.clear()
         codes = [(f"{20 + i}{21 + i}", i == 0) for i in range(len(seasons))]
-        monkeypatch.setattr(c, "_fduk_season_codes", lambda n: codes)
+        monkeypatch.setattr(c, "_fduk_season_codes", lambda n, as_of=None: codes)
         by_code = dict(zip([code for code, _ in codes], seasons))
         monkeypatch.setattr(
             c, "_fduk_fetch_season", lambda div, code, is_cur: by_code.get(code, "")
         )
-        return c._local_elo_table("D1", len(seasons))
+        # Horizon past every canned fixture: these tests are about the walk,
+        # not about the as-of cutoff (which TestLocalEloAsOf covers).
+        return c._local_elo_table("D1", len(seasons), "2099-12-31")
 
     def test_winner_gains_exactly_what_the_loser_drops(self, monkeypatch):
         table = self._table(
@@ -2893,14 +2895,14 @@ class TestLocalEloEntry:
     def test_rank_counts_current_members_only(self, monkeypatch):
         from sports_skills.football import _connector as c
 
-        monkeypatch.setattr(c, "_local_elo_table", lambda div, n: self.TABLE)
+        monkeypatch.setattr(c, "_local_elo_table", lambda div, n, as_of=None: self.TABLE)
         entry, _ = c._local_elo_entry({"name": "Bayern Munich", "slug": "bundesliga"})
         assert (entry["division_rank"], entry["division_size"]) == (1, 2)
 
     def test_relegated_club_is_rated_but_unranked(self, monkeypatch):
         from sports_skills.football import _connector as c
 
-        monkeypatch.setattr(c, "_local_elo_table", lambda div, n: self.TABLE)
+        monkeypatch.setattr(c, "_local_elo_table", lambda div, n, as_of=None: self.TABLE)
         entry, _ = c._local_elo_entry({"name": "Hannover", "slug": "bundesliga"})
         assert entry["resolved"] is True
         assert entry["elo"] == 1440.0
@@ -2915,7 +2917,7 @@ class TestLocalEloStrength:
     def test_source_is_never_labelled_clubelo(self, monkeypatch):
         from sports_skills.football import _connector as c
 
-        monkeypatch.setattr(c, "_local_elo_table", lambda div, n: self.TABLE_D1)
+        monkeypatch.setattr(c, "_local_elo_table", lambda div, n, as_of=None: self.TABLE_D1)
         out = c._local_elo_strength(
             [{"name": "Bayern Munich", "slug": "bundesliga"}], "2026-09-04", 10
         )
@@ -2936,7 +2938,7 @@ class TestLocalEloStrength:
                 current_labels=["Arsenal"],
             ),
         }
-        monkeypatch.setattr(c, "_local_elo_table", lambda div, n: tables[div])
+        monkeypatch.setattr(c, "_local_elo_table", lambda div, n, as_of=None: tables[div])
         out = c._local_elo_strength(
             [
                 {"name": "Bayern Munich", "slug": "bundesliga"},
@@ -2952,7 +2954,7 @@ class TestLocalEloStrength:
     def test_same_division_reports_favourite_and_probabilities(self, monkeypatch):
         from sports_skills.football import _connector as c
 
-        monkeypatch.setattr(c, "_local_elo_table", lambda div, n: self.TABLE_D1)
+        monkeypatch.setattr(c, "_local_elo_table", lambda div, n, as_of=None: self.TABLE_D1)
         out = c._local_elo_strength(
             [
                 {"name": "Schalke 04", "slug": "bundesliga"},
@@ -2966,3 +2968,154 @@ class TestLocalEloStrength:
         probs = out["outcome_probabilities"]
         assert probs["home_win"] + probs["draw"] + probs["away_win"] == pytest.approx(1.0)
         assert "Schalke 04 at home" in probs["note"]
+
+
+class TestLocalEloPublicSurface:
+    """max_seasons must exist on every layer that documents it."""
+
+    def test_wrapper_accepts_max_seasons(self, monkeypatch):
+        from sports_skills import football
+
+        seen = {}
+        monkeypatch.setattr(
+            football, "_get_team_strength", lambda rd: seen.update(rd["params"]) or {}
+        )
+        football.get_team_strength(team_id="132", max_seasons=5)
+        assert seen["max_seasons"] == 5
+
+    def test_cli_registry_advertises_max_seasons(self):
+        from sports_skills.cli import _REGISTRY
+
+        entry = _REGISTRY["football"]["get_team_strength"]
+        assert "max_seasons" in entry["optional"]
+
+    def test_documented_optionals_are_all_accepted_by_the_wrapper(self):
+        import inspect
+
+        from sports_skills import football
+        from sports_skills.cli import _REGISTRY
+
+        entry = _REGISTRY["football"]["get_team_strength"]
+        params = set(inspect.signature(football.get_team_strength).parameters)
+        assert set(entry["required"]) | set(entry["optional"]) <= params
+
+
+class TestLocalEloAsOf:
+    """A historical request must be rated as of that date, not today."""
+
+    SEASONS = {
+        "1920": (
+            "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\r\n"
+            "D1,10/08/2019,Alpha,Beta,3,0,H\r\n"
+        ),
+        "2627": (
+            "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\r\n"
+            "D1,10/08/2026,Beta,Alpha,4,0,H\r\n"
+            "D1,20/09/2026,Beta,Alpha,4,0,H\r\n"
+        ),
+    }
+
+    def _patch(self, monkeypatch):
+        from sports_skills.football import _connector as c
+
+        c._cache.clear()
+        monkeypatch.setattr(
+            c,
+            "_fduk_season_codes",
+            lambda n, as_of=None: (
+                [("1920", True)]
+                if as_of and as_of.year < 2026
+                else [("2627", True), ("1920", False)]
+            ),
+        )
+        monkeypatch.setattr(
+            c, "_fduk_fetch_season", lambda div, code, cur: self.SEASONS.get(code, "")
+        )
+        return c
+
+    def test_historical_date_ignores_later_seasons(self, monkeypatch):
+        c = self._patch(monkeypatch)
+        past = c._local_elo_table("D1", 10, "2020-01-01")
+        now = c._local_elo_table("D1", 10, "2026-12-31")
+        # Alpha won in 2019 and lost twice in 2026: the two views must differ.
+        assert past["ratings"]["Alpha"] > past["ratings"]["Beta"]
+        assert now["ratings"]["Alpha"] < now["ratings"]["Beta"]
+
+    def test_as_of_never_reports_a_match_after_the_requested_date(self, monkeypatch):
+        c = self._patch(monkeypatch)
+        table = c._local_elo_table("D1", 10, "2026-09-01")
+        assert table["as_of"] <= "2026-09-01"
+        # The 20/09 fixture is beyond the horizon and must not be counted.
+        assert table["matches"] == 2
+
+    def test_historical_and_live_tables_are_cached_apart(self, monkeypatch):
+        c = self._patch(monkeypatch)
+        past = c._local_elo_table("D1", 10, "2020-01-01")
+        now = c._local_elo_table("D1", 10, "2026-12-31")
+        assert past["as_of"] != now["as_of"]
+
+    def test_strength_entry_carries_the_dated_as_of(self, monkeypatch):
+        c = self._patch(monkeypatch)
+        monkeypatch.setitem(c.LEAGUES, "bundesliga", dict(c.LEAGUES["bundesliga"]))
+        out = c._local_elo_strength(
+            [{"name": "Alpha", "slug": "bundesliga"}], "2020-01-01", 10
+        )
+        assert out["teams"][0]["as_of"] == "2019-08-10"
+        assert "2020-01-01" in out["method"]
+
+
+class TestLocalEloHistoricalAliases:
+    """A provider rename must not split one club's history in two."""
+
+    SEASONS = {
+        "old": (
+            "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\r\n"
+            "B1,10/08/2019,Beveren,Rival,3,0,H\r\n"
+        ),
+        "new": (
+            "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\r\n"
+            "B1,10/08/2020,Waasland-Beveren,Rival,3,0,H\r\n"
+        ),
+    }
+
+    def _table(self, monkeypatch):
+        from sports_skills.football import _connector as c
+
+        c._cache.clear()
+        monkeypatch.setattr(
+            c, "_fduk_season_codes", lambda n, as_of=None: [("new", True), ("old", False)]
+        )
+        monkeypatch.setattr(
+            c, "_fduk_fetch_season", lambda div, code, cur: self.SEASONS.get(code, "")
+        )
+        return c._local_elo_table("B1", 10, "2026-12-31")
+
+    def test_both_labels_fold_onto_one_rating(self, monkeypatch):
+        table = self._table(monkeypatch)
+        assert "Beveren" not in table["ratings"]
+        assert table["games"]["Waasland-Beveren"] == 2
+
+    def test_canonical_map_only_covers_declared_renames(self):
+        from sports_skills.football._connector import _fduk_canonical_labels
+
+        canonical = _fduk_canonical_labels()
+        assert canonical["Beveren"] == canonical["Waasland-Beveren"]
+        # Same-city rivals are never folded together.
+        assert "Dundee" not in canonical
+        assert "Paris FC" not in canonical
+
+
+class TestLocalEloOutageMessage:
+    """An outage must not be reported as a name-resolution gap."""
+
+    def test_unfetchable_results_say_so(self, monkeypatch):
+        from sports_skills.football import _connector as c
+
+        c._cache.clear()
+        monkeypatch.setattr(c, "_fduk_fetch_season", lambda div, code, cur: "")
+        out = c._local_elo_strength(
+            [{"name": "Bayern Munich", "slug": "bundesliga"}], "2026-09-07", 10
+        )
+        assert out["teams"][0]["reason"] == "no_results_available"
+        assert "Both sources are unreachable" in out["message"]
+        assert "name-resolution" not in out["message"]

@@ -203,6 +203,16 @@ returns ratings computed here from the football-data.co.uk result CSVs (the same
 files head-to-head uses), with `source: "local-elo"`, a `method` string naming the
 parameters, and `fallback_reason`. Read `source` before comparing two responses.
 
+`date` is honoured, not ignored: the fallback rates the division **as it stood on
+that date** — both the seasons walked and the matches inside them stop there — so a
+2020 request is answered with 2020 ratings. Each entry's `as_of` is the last match
+actually counted, which is on or before the requested date. Clubs the provider has
+renamed (Beveren -> Waasland-Beveren) are rated as one club, not two.
+
+If football-data.co.uk is unreachable too, entries carry `reason:
+"no_results_available"` and the message says both sources are down — that is an
+outage, not a claim about the club or its name.
+
 The fallback's scale is **division-local and not comparable to ClubElo's** — only
 the gap between two ratings within one division carries meaning, so a comparison
 across divisions is refused (no `favorite`, no `elo_difference`) rather than

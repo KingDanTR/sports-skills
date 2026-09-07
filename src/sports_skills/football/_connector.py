@@ -3303,9 +3303,11 @@ def _local_elo_table(div, max_seasons=10, as_of_iso=None):
         if not results:
             continue
         seasons_used += 1
-        # The newest season with results defines who is in the division now, so
-        # a rank is taken among current members rather than everyone ever seen.
-        current_labels = {r[1] for r in results} | {r[2] for r in results}
+        # Only the season expected for the requested date defines membership.
+        # Prior-season ratings remain useful when that season is unavailable,
+        # but its clubs must not be presented as current.
+        if is_current:
+            current_labels = {r[1] for r in results} | {r[2] for r in results}
         for label in ratings:
             ratings[label] = _ELO_START + _ELO_SEASON_REGRESSION * (
                 ratings[label] - _ELO_START
@@ -3669,6 +3671,24 @@ def _local_elo_strength(metas, date_iso, max_seasons):
         ),
         "fallback_reason": "ClubElo ratings are temporarily unavailable.",
     }
+    stale_tables = [
+        table
+        for table in tables
+        if table and table.get("ratings") and not table.get("current_labels")
+    ]
+    stale_notice = None
+    if stale_tables:
+        is_live = date_iso >= datetime.now().strftime("%Y-%m-%d")
+        period = (
+            "Current-season results"
+            if is_live
+            else f"Results for the season containing {date_iso}"
+        )
+        stale_notice = (
+            f"{period} are unavailable from football-data.co.uk, so these "
+            "retained prior-season ratings are stale; current division membership "
+            "and rank are not reported."
+        )
     resolved = [e for e in entries if e["resolved"]]
     if len(entries) == 2 and len(resolved) == 2:
         if entries[0]["div"] != entries[1]["div"]:
@@ -3679,6 +3699,8 @@ def _local_elo_strength(metas, date_iso, max_seasons):
                 "ClubElo's cross-league scale is the right tool here; retry when "
                 "it is reachable."
             )
+            if stale_notice:
+                result["message"] = f"{stale_notice} {result['message']}"
             return result
         diff = round(entries[0]["elo"] - entries[1]["elo"], 1)
         result["elo_difference"] = diff
@@ -3724,6 +3746,8 @@ def _local_elo_strength(metas, date_iso, max_seasons):
             "`games`: a recently promoted club may be rated off very little "
             "history, and each entry's `as_of` is the last match actually counted."
         )
+    if stale_notice:
+        result["message"] = f"{stale_notice} {result['message']}"
     return result
 
 

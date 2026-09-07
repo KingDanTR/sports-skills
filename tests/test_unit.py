@@ -2989,6 +2989,15 @@ class TestLocalEloPublicSurface:
         entry = _REGISTRY["football"]["get_team_strength"]
         assert "max_seasons" in entry["optional"]
 
+    def test_generated_schema_types_max_seasons_as_integer(self):
+        from sports_skills.cli import _generate_schema
+
+        schema = _generate_schema("football")
+        tool = next(
+            t for t in schema["tools"] if t["name"] == "football_get_team_strength"
+        )
+        assert tool["parameters"]["properties"]["max_seasons"]["type"] == "integer"
+
     def test_documented_optionals_are_all_accepted_by_the_wrapper(self):
         import inspect
 
@@ -3040,6 +3049,7 @@ class TestLocalEloAsOf:
         # Alpha won in 2019 and lost twice in 2026: the two views must differ.
         assert past["ratings"]["Alpha"] > past["ratings"]["Beta"]
         assert now["ratings"]["Alpha"] < now["ratings"]["Beta"]
+        assert set(past["current_labels"]) == {"Alpha", "Beta"}
 
     def test_as_of_never_reports_a_match_after_the_requested_date(self, monkeypatch):
         c = self._patch(monkeypatch)
@@ -3061,7 +3071,46 @@ class TestLocalEloAsOf:
             [{"name": "Alpha", "slug": "bundesliga"}], "2020-01-01", 10
         )
         assert out["teams"][0]["as_of"] == "2019-08-10"
+        assert out["teams"][0]["division_rank"] == 1
         assert "2020-01-01" in out["method"]
+
+    def test_live_missing_current_season_keeps_prior_rating_unranked(self, monkeypatch):
+        from sports_skills.football import _connector as c
+
+        today = c.datetime.now().strftime("%Y-%m-%d")
+        prior_date = f"{c.datetime.now().year - 1}-09-01"
+        prior_csv_date = c.datetime.strptime(prior_date, "%Y-%m-%d").strftime(
+            "%d/%m/%Y"
+        )
+        prior_csv = (
+            "Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR\r\n"
+            f"D1,{prior_csv_date},Alpha,Beta,3,0,H\r\n"
+        )
+        c._cache.clear()
+        monkeypatch.setattr(
+            c,
+            "_fduk_season_codes",
+            lambda n, as_of=None: [("current", True), ("prior", False)],
+        )
+        monkeypatch.setattr(
+            c,
+            "_fduk_fetch_season",
+            lambda div, code, cur: "" if code == "current" else prior_csv,
+        )
+
+        table = c._local_elo_table("D1", 10, today)
+        assert table["ratings"]["Alpha"] > table["ratings"]["Beta"]
+        assert table["as_of"] == prior_date
+        assert table["current_labels"] == []
+
+        out = c._local_elo_strength(
+            [{"name": "Alpha", "slug": "bundesliga"}], today, 10
+        )
+        assert out["teams"][0]["elo"] == table["ratings"]["Alpha"]
+        assert out["teams"][0]["as_of"] == prior_date
+        assert out["teams"][0]["division_rank"] is None
+        assert "current-season results are unavailable" in out["message"].lower()
+        assert "stale" in out["message"].lower()
 
 
 class TestLocalEloHistoricalAliases:

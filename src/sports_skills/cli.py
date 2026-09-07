@@ -593,6 +593,7 @@ _INT_PARAMS = {
     "innings",
     "interval_seconds",
     "window_seconds",
+    "max_seasons",
 }
 
 # Int params that also accept documented string forms (see _parse_value).

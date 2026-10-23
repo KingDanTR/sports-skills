@@ -143,6 +143,19 @@ Returns `data.fixtures[]` (per fixture: `date`, `competition`, home/away teams,
 `likely_scorelines`). Model-free probabilities — useful alongside the betting/odds
 skills. Empty result carries an explanatory `message`.
 
+### get_match_odds
+Bookmaker odds for the upcoming round via football-data.co.uk (free CSV). Same 11
+European domestic leagues as `get_head_to_head`. Prices only — never places bets.
+- `competition_id` (str, optional): League id → all upcoming priced fixtures. Required unless `team_id` is given.
+- `team_id` (str, optional): ESPN team ID → that club's upcoming fixture
+- `team_id_2` (str, optional): Second ESPN team ID → the fixture between the two clubs
+- `league_slug` (str, optional): Alias for `competition_id`
+
+Returns `data.fixtures[]` with 1X2 and over/under 2.5 prices per book, margin-free
+`implied_probabilities` / `implied_total_goals_2_5`, and `kickoff_utc` (the
+published `time` is UK local). Empty between rounds with an explanatory `message`
+— never last round's prices. See `api-reference.md` for the full shape.
+
 ### get_event_xg
 - `event_id` (str, required): Match/event ID. Top 5 leagues only.
 

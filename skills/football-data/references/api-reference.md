@@ -240,6 +240,31 @@ Returns `data.fixtures[]` with `date`, `competition`, home/away teams, `team_sid
 Model-free probabilities derived from ClubElo's goal-difference distribution — pairs
 with the betting/odds skills. Empty results carry an explanatory `message`.
 
+### get_match_odds
+Bookmaker odds for the upcoming round via football-data.co.uk's `fixtures.csv` (free).
+Same 11 European domestic leagues as `get_head_to_head`. Prices only — never places bets.
+- `competition_id` (str, optional): League id (e.g. `"bundesliga"`) → every upcoming priced fixture in that league. Required unless `team_id` is given.
+- `team_id` (str, optional): ESPN team ID → that club's upcoming fixture (league inferred)
+- `team_id_2` (str, optional): Second ESPN team ID → the fixture between the two clubs
+- `league_slug` (str, optional): Alias for `competition_id`
+
+Returns `data.fixtures[]`, each with `date`, `time` + `time_zone` (UK local, as
+published), `kickoff_utc`, `home_team` / `away_team` (provider labels), and
+`odds.match_result` / `odds.total_goals_2_5` keyed by book (`average`, `maximum`,
+`bet365`, `pinnacle` — only books with a complete price are present). Also
+`implied_probabilities` (home/draw/away) and `implied_total_goals_2_5` (over/under):
+the bookmaker margin removed proportionally, with the `overround` and the `basis`
+book used (average, else Pinnacle, else Bet365 — the cross-book maximum is never a
+basis). Top level: `source`, `as_of`, a `note` caveat, and with team filters
+`teams[]` with `resolved` + `matched_as`.
+
+**Freshness.** The provider refreshes the file shortly before each round. Rows dated
+before today are dropped and counted in `stale_rows_dropped`; an empty league
+returns a `message` saying the file is stale or not yet published. A club with no
+fixture gets a `reason`: `no_upcoming_fixture` (club is in the division this season
+but not in the file), `not_found` (name could not be matched — a resolution gap,
+not a claim about the club), or `not_in_fixtures_file` (neither could be verified).
+
 ### get_event_xg
 Get expected goals (xG) from Understat. **Top 5 leagues only.**
 - `event_id` (str, required): Match/event ID

@@ -44,6 +44,9 @@ from sports_skills.football._connector import (
     get_match_forecast as _get_match_forecast,
 )
 from sports_skills.football._connector import (
+    get_match_odds as _get_match_odds,
+)
+from sports_skills.football._connector import (
     get_missing_players as _get_missing_players,
 )
 from sports_skills.football._connector import (
@@ -279,6 +282,44 @@ def get_head_to_head(
                 team_id_2=team_id_2,
                 league_slug=league_slug,
                 max_seasons=max_seasons,
+            )
+        )
+    )
+
+
+def get_match_odds(
+    *,
+    competition_id: str | None = None,
+    team_id: str | None = None,
+    team_id_2: str | None = None,
+    league_slug: str | None = None,
+) -> dict:
+    """Get bookmaker odds for upcoming fixtures (via football-data.co.uk).
+
+    Match result (home/draw/away) and over/under 2.5 goals from several books
+    (market average and maximum, Bet365, Pinnacle), plus margin-free implied
+    probabilities. Covers European domestic leagues only (Premier League,
+    Championship, La Liga, Serie A, Bundesliga, Ligue 1, Eredivisie, Primeira
+    Liga, Scottish Premiership, Belgian Pro League, Turkish Super Lig). The
+    provider refreshes its file shortly before each round, so between rounds the
+    result can be empty with an explanatory message. Prices only — never places bets.
+
+    Args:
+        competition_id: League id (e.g. "bundesliga") — returns every upcoming
+            priced fixture in that league. Required unless team_id is given.
+        team_id: Optional ESPN team ID (numeric string), from search_team() —
+            narrows to that club's upcoming fixture.
+        team_id_2: Optional second ESPN team ID — narrows to the fixture between
+            the two clubs.
+        league_slug: Optional alias for competition_id.
+    """
+    return wrap(
+        _get_match_odds(
+            _params(
+                competition_id=competition_id,
+                team_id=team_id,
+                team_id_2=team_id_2,
+                league_slug=league_slug,
             )
         )
     )

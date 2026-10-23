@@ -3773,6 +3773,317 @@ def get_head_to_head(request_data):
 
 
 # ============================================================
+# Upcoming fixture odds (football-data.co.uk fixtures.csv)
+# ============================================================
+#
+# football-data.co.uk publishes a rolling `fixtures.csv` with the next round of
+# its covered leagues, priced by bookmakers: market average and maximum, Bet365
+# and Pinnacle, for the match result (1X2) and for over/under 2.5 goals. It is
+# the same provider as head-to-head, so club labels resolve the same way.
+#
+# Two facts shape the contract. The file is refreshed shortly before a round and
+# can be stale for days in between — it has been observed carrying only past
+# fixtures and no Bundesliga rows at all — so rows dated before today are
+# dropped and counted, and an empty league says why rather than presenting last
+# round's prices as current. And these are bookmaker prices with the margin
+# built in: `implied_probabilities` removes it proportionally (the same method
+# as `betting.devig`) so the outcomes of one market sum to 1.
+
+_FDUK_FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+# (output name, column prefix) per book. Over/under uses "P" for Pinnacle where
+# the match result uses "PS". "Maximum" is the best price across books, so it is
+# reported but never used as a basis for implied probabilities.
+_FDUK_MATCH_BOOKS = (
+    ("average", "Avg"),
+    ("maximum", "Max"),
+    ("bet365", "B365"),
+    ("pinnacle", "PS"),
+)
+_FDUK_TOTAL_BOOKS = (
+    ("average", "Avg"),
+    ("maximum", "Max"),
+    ("bet365", "B365"),
+    ("pinnacle", "P"),
+)
+_FDUK_ODDS_BASES = ("average", "pinnacle", "bet365")
+_ODDS_NOTE = (
+    "Bookmaker prices for information only: they include the bookmaker margin and "
+    "move until kickoff. This skill reads published prices and never places bets."
+)
+_ODDS_RETRY_HINT = (
+    "football-data.co.uk refreshes its fixtures file shortly before each round — retry closer to the matchday."
+)
+
+
+def _fduk_fetch_fixtures():
+    """Fetch football-data.co.uk's upcoming-fixtures CSV as text (cached), or ''."""
+    cache_key = "fduk:fixtures"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    raw, err = _http_fetch(
+        _FDUK_FIXTURES_URL,
+        headers={"User-Agent": "Mozilla/5.0 (sports-skills)"},
+        max_retries=1,
+    )
+    if err or not raw:
+        _cache_set(cache_key, "", ttl=600)  # short: a retry soon may succeed
+        return ""
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    # Prices move and the file is refreshed a few times a week.
+    _cache_set(cache_key, text, ttl=1800)
+    return text
+
+
+def _fduk_decimal(x):
+    """Parse a decimal-odds cell, or None when blank, invalid or not a real price."""
+    try:
+        value = float(str(x).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 1.0 else None
+
+
+def _fair_probabilities(prices):
+    """Proportional de-vig of decimal odds -> (fair probabilities, overround)."""
+    raw = [1.0 / p for p in prices]
+    overround = sum(raw)
+    return [r / overround for r in raw], overround
+
+
+def _fduk_row_odds(row):
+    """Per-book prices from one fixtures.csv row: (match_result, total_goals_2_5)."""
+    match, total = {}, {}
+    for name, prefix in _FDUK_MATCH_BOOKS:
+        prices = [_fduk_decimal(row.get(prefix + side)) for side in ("H", "D", "A")]
+        if all(prices):
+            match[name] = dict(zip(("home", "draw", "away"), prices))
+    for name, prefix in _FDUK_TOTAL_BOOKS:
+        prices = [_fduk_decimal(row.get(prefix + side)) for side in (">2.5", "<2.5")]
+        if all(prices):
+            total[name] = dict(zip(("over", "under"), prices))
+    return match, total
+
+
+def _implied(book_prices, outcomes):
+    """De-vigged probabilities from the best available book, or None."""
+    basis = next((b for b in _FDUK_ODDS_BASES if b in book_prices), None)
+    if not basis:
+        return None
+    fair, overround = _fair_probabilities([book_prices[basis][o] for o in outcomes])
+    implied = {o: round(p, 4) for o, p in zip(outcomes, fair)}
+    implied.update(overround=round(overround, 4), basis=basis)
+    return implied
+
+
+def _fduk_kickoff_utc(date, time_text):
+    """Kickoff as ISO UTC, or None.
+
+    football-data.co.uk publishes UK local times (19:30 for an 20:30 CEST
+    kickoff), which silently misleads anyone outside the UK — so convert.
+    """
+    if not re.fullmatch(r"\d{1,2}:\d{2}", time_text or ""):
+        return None
+    try:
+        london = ZoneInfo("Europe/London")
+    except ZoneInfoNotFoundError:
+        return None
+    local = datetime.strptime(f"{date} {time_text}", "%Y-%m-%d %H:%M")
+    utc = local.replace(tzinfo=london).astimezone(timezone.utc)
+    return utc.strftime("%Y-%m-%dT%H:%MZ")
+
+
+def _fduk_fixtures_from_csv(text, div, today):
+    """Upcoming priced fixtures for one division from fixtures.csv text.
+
+    Pure (no network). Returns (fixtures, stale_rows): rows dated before `today`
+    (YYYY-MM-DD) are counted, not returned, so a stale file can never pass off
+    last round's prices as current.
+    """
+    fixtures, stale = [], 0
+    if not text:
+        return fixtures, stale
+    for row in csv.DictReader(io.StringIO(text)):
+        if (row.get("Div") or "").strip() != div:
+            continue
+        home = (row.get("HomeTeam") or "").strip()
+        away = (row.get("AwayTeam") or "").strip()
+        date = _fduk_date_iso(row.get("Date"))
+        if not home or not away or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            continue
+        if date < today:
+            stale += 1
+            continue
+        match, total = _fduk_row_odds(row)
+        if not match and not total:
+            continue
+        time_text = (row.get("Time") or "").strip()
+        fixture = {
+            "date": date,
+            "time": time_text,
+            "time_zone": "Europe/London",
+            "home_team": {"name": home},
+            "away_team": {"name": away},
+            "odds": {"match_result": match, "total_goals_2_5": total},
+        }
+        kickoff = _fduk_kickoff_utc(date, time_text)
+        if kickoff:
+            fixture["kickoff_utc"] = kickoff
+        implied = _implied(match, ("home", "draw", "away"))
+        if implied:
+            fixture["implied_probabilities"] = implied
+        implied_total = _implied(total, ("over", "under"))
+        if implied_total:
+            fixture["implied_total_goals_2_5"] = implied_total
+        fixtures.append(fixture)
+    fixtures.sort(key=lambda f: (f["date"], f["time"]))
+    return fixtures, stale
+
+
+def _fduk_fixture_absence_reason(espn_name, div):
+    """Why a club has no fixture in the file: not playing, or not recognised.
+
+    Checked against the division's current-season results, which list every
+    club in the division: a club found there simply has no priced fixture yet,
+    while a club found nowhere is a name-resolution gap. If the season file is
+    unreachable too, neither can be claimed.
+    """
+    code, is_current = _fduk_season_codes(1)[0]
+    labels = _fduk_labels_from_csv(_fduk_fetch_season(div, code, is_current))
+    if not labels:
+        return "not_in_fixtures_file"
+    label, _ = _fduk_resolve_label(espn_name, labels)
+    return "no_upcoming_fixture" if label else "not_found"
+
+
+def _match_odds_empty_message(league_name, stale, teams):
+    """Explain an empty result truthfully: stale file, absent club, or name gap."""
+    unresolved = [t for t in teams if not t["resolved"]]
+    if unresolved:
+        reasons = {
+            "no_upcoming_fixture": "has no priced fixture in the current file",
+            "not_found": (
+                "could not be matched to a football-data.co.uk team label "
+                "(a name-resolution gap, not a statement about the club)"
+            ),
+            "not_in_fixtures_file": "is not in the current fixtures file",
+        }
+        parts = [f"{t['name']} {reasons[t['reason']]}" for t in unresolved]
+        hint = f" {_ODDS_RETRY_HINT}" if any(t["reason"] != "not_found" for t in unresolved) else ""
+        return "; ".join(parts) + "." + hint
+    if len(teams) == 2:
+        return f"No upcoming fixture between {teams[0]['name']} and {teams[1]['name']} in the current file."
+    if teams:
+        return f"No upcoming priced fixture for {teams[0]['name']} in the current file."
+    if stale:
+        return (
+            f"football-data.co.uk's fixtures file lists only past {league_name} "
+            f"matches ({stale} rows dropped as stale). {_ODDS_RETRY_HINT}"
+        )
+    return f"No upcoming {league_name} fixtures in the file yet. {_ODDS_RETRY_HINT}"
+
+
+def get_match_odds(request_data):
+    """Bookmaker odds for upcoming fixtures via football-data.co.uk (free CSV).
+
+    Match result (1X2) and over/under 2.5 goals from several books, plus
+    margin-free implied probabilities. Covers the same European domestic
+    leagues as `get_head_to_head`. Prices only — never places bets.
+    """
+    params = request_data.get("params", {})
+    ca = params.get("command_attribute", {}) or {}
+    competition = (
+        params.get("competition_id")
+        or ca.get("competition_id")
+        or params.get("league_slug")
+        or ca.get("league_slug")
+        or ""
+    )
+    team_ids = [
+        t
+        for t in (
+            params.get("team_id") or ca.get("team_id", ""),
+            params.get("team_id_2") or ca.get("team_id_2", ""),
+        )
+        if t
+    ]
+    slug = None
+    if competition:
+        league, slug = _resolve_competition(competition)
+        if not league:
+            return {
+                "fixtures": [],
+                "error": True,
+                "message": (f"Unknown competition '{competition}'. Call get_competitions for valid ids."),
+            }
+    if not slug and not team_ids:
+        return {
+            "fixtures": [],
+            "error": True,
+            "message": "Pass competition_id (e.g. 'bundesliga') or team_id.",
+        }
+    teams = []
+    for raw_id in team_ids:
+        tid = _resolve_team_id(raw_id, params={"team_id": raw_id, **({"league_slug": slug} if slug else {})})
+        meta = _resolve_espn_team_meta(tid, slug) if tid else None
+        if not meta:
+            return {
+                "fixtures": [],
+                "error": True,
+                "message": f"Could not resolve team '{raw_id}'.",
+            }
+        teams.append({"id": tid, "name": meta["name"], "slug": meta.get("slug")})
+    slug = slug or teams[0]["slug"]
+    league = LEAGUES.get(slug, {})
+    league_name = league.get("name") or slug or "this league"
+    result = {
+        "competition": {"id": slug, "name": league.get("name", "")},
+        "fixtures": [],
+        "source": "football-data.co.uk",
+        "note": _ODDS_NOTE,
+    }
+    div = league.get("fduk")
+    if not div:
+        result["message"] = (
+            f"No free bookmaker odds for {league_name}. football-data.co.uk fixtures cover: {_FDUK_H2H_COVERAGE}."
+        )
+        return result
+    text = _fduk_fetch_fixtures()
+    if not text:
+        result["message"] = "football-data.co.uk's fixtures file could not be fetched — retry later."
+        return result
+    today = datetime.now().strftime("%Y-%m-%d")
+    fixtures, stale = _fduk_fixtures_from_csv(text, div, today)
+    result["as_of"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if stale:
+        result["stale_rows_dropped"] = stale
+    if teams:
+        labels = {f["home_team"]["name"] for f in fixtures} | {f["away_team"]["name"] for f in fixtures}
+        resolved = []
+        for team in teams:
+            label, _ = _fduk_resolve_label(team["name"], labels)
+            entry = {"id": team["id"], "name": team["name"], "resolved": bool(label)}
+            if label:
+                entry["matched_as"] = label
+            else:
+                entry["reason"] = _fduk_fixture_absence_reason(team["name"], div)
+            resolved.append(entry)
+        result["teams"] = resolved
+        wanted = {t["matched_as"] for t in resolved if t["resolved"]}
+        if len(wanted) == len(resolved):
+            fixtures = [f for f in fixtures if wanted <= {f["home_team"]["name"], f["away_team"]["name"]}]
+        else:
+            fixtures = []
+    result["fixtures"] = fixtures
+    if not fixtures:
+        result["message"] = _match_odds_empty_message(league_name, stale, result.get("teams", []))
+    return result
+
+
+# ============================================================
 # Team strength (ClubElo, free CSV — European clubs)
 # ============================================================
 

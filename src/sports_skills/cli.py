@@ -49,6 +49,9 @@ _REGISTRY = {
             "required": ["team_id", "team_id_2"],
             "optional": ["league_slug", "max_seasons"],
         },
+        "get_match_odds": {
+            "optional": ["competition_id", "team_id", "team_id_2", "league_slug"],
+        },
         "get_team_strength": {
             "required": ["team_id"],
             "optional": ["team_id_2", "date", "league_slug", "max_seasons"],
